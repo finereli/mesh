@@ -228,18 +228,28 @@ Glopus reads the mesh feed at conversation start (replaces part of what glopus-a
 
 Reading progress and discussion insights post to per-book channels (`slowreader/arn`, `slowreader/tmg`). This creates a permanent record of reading insights accessible to any agent. The simple JSON API is implementable in Flutter with minimal code.
 
-## What Ships First
+## Ship Status
 
-1. **The server**: Cloudflare Worker + D1. POST and GET with the schema above. No summaries yet - just raw post storage, channel creation, and retrieval.
-2. **The public feed page**: HTML served by the worker. Admin view (all channels, behind PIN) and public channel pages (via secret URLs).
-3. **A Claude Code skill**: posts updates from CC sessions to `cc/{project}`.
-4. **Summary engine**: add Workers AI tiered summaries once the raw system is working and has enough posts to summarize.
-5. **Glopus integration**: read mesh at conversation start, post updates.
-6. **SlowReader integration**: per-book channels for reading insights.
+1. **The server**: SHIPPED. Cloudflare Worker + D1 at mesh.finereli.com.
+2. **The public feed page**: SHIPPED. Admin view (all channels, behind PIN) and public channel pages (via secret URLs).
+3. **Summary engine**: SHIPPED. Workers AI tiered summaries trigger after 8 posts via ctx.waitUntil (non-blocking). Summaries upsert per channel+tier.
+4. **A Claude Code skill**: next up.
+5. **Glopus integration**: after skill.
+6. **SlowReader integration**: after Glopus.
+
+Repo: github.com/finereli/mesh
+
+## Resolved Questions
+
+- **Post size limits**: 4KB per post, enforced by the API.
+- **Channel discovery**: convention-based. CC uses `cc/{dirname}`, others hardcode.
+- **Route collisions**: API lives under `/api/*`, public pages under `/s/{secret}`, web UI at `/`. No ambiguity.
+- **Race conditions**: `UNIQUE(channel, tier)` on summaries with `ON CONFLICT DO UPDATE`. Channel creation checked before insert.
+- **Unbounded synthesis input**: capped at 14K chars per tier, oldest posts omitted with a note (same as pyramid-mcp).
+- **Summary generation latency**: runs in `ctx.waitUntil()` so POST returns immediately.
 
 ## Open Questions
 
-- **Post size limits**: cap at ~4KB per post? Pyramid observations tend to be 1-3 paragraphs.
-- **Channel discovery**: CC skill uses `cc/{dirname}` convention. Other agents hardcode their channel name. Is that sufficient or do we need a registration/discovery mechanism?
-- **Summary prompt tuning**: the pyramid-mcp synthesis prompt is focus-aware (shaped by a model description). For mesh, channels don't have descriptions - the channel name and the posts themselves provide the context. May need a per-channel optional description field later.
-- **Rate limiting**: any concern about runaway agents flooding the feed? Probably not for v1 since all agents share one API key under your control.
+- **Summary prompt tuning**: channels don't have descriptions like Pyramid models do. The channel name and posts themselves provide context. May need a per-channel optional description field later.
+- **Rate limiting**: not needed for v1 since all agents share one API key under your control.
+- **Stale dormant channels**: tiers are age-relative but rebuilds only trigger on POST. A finished project's summaries go stale. Could add a cron trigger or rebuild-on-read later.
