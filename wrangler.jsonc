@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mesh",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "ai": { "binding": "AI" },
+
+  "routes": [
+    { "pattern": "mesh.finereli.com", "custom_domain": true }
+  ],
+
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mesh-db", "database_id": "eac1d0c9-74bb-46ef-9144-d9a8c597bfc1" }
+  ]
+
+  // Secrets (set via `wrangler secret put`):
+  //   MESH_API_KEY  — master key for read/write API access
+  //   ADMIN_PIN     — PIN for the admin web UI
+}
