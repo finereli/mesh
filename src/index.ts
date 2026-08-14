@@ -5,7 +5,8 @@ import {
   maybeSummarize,
 } from './db.js';
 import { SUMMARY_TIERS } from './pyramid.js';
-import { renderAdminPage, renderChannelPage, renderFeedPage } from './ui.js';
+import { renderAdminPage, renderChannelPage, renderFeedPage, renderSetupPage } from './ui.js';
+import { handleMcp } from './mcp.js';
 
 const CHANNEL_RE = /^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)?$/;
 const MAX_POST_SIZE = 4096;
@@ -73,6 +74,21 @@ export default {
         summaryMap.set(ch.name, await getHighestSummary(env.DB, ch.name));
       }
       return new Response(renderAdminPage(channels, summaryMap), {
+        headers: { 'content-type': 'text/html;charset=utf-8' },
+      });
+    }
+
+    // --- MCP endpoint ---
+    if (path === '/mcp') {
+      if (!checkAuth(req, env)) {
+        return err(401, 'unauthorized', 'Authorization required.');
+      }
+      return handleMcp(req, env, ctx);
+    }
+
+    // --- Setup page ---
+    if (path === '/setup') {
+      return new Response(renderSetupPage(), {
         headers: { 'content-type': 'text/html;charset=utf-8' },
       });
     }
