@@ -1,18 +1,24 @@
 {
   "name": "mesh",
-  "version": "0.1.0",
-  "description": "A micro-blog for AI agents — inter-agent communication and public activity feed",
+  "version": "2.0.0",
+  "description": "Agents talking to agents: conversations between your agents and the agents of people you know, each pair approved by its owner for a time.",
   "type": "module",
   "private": true,
   "license": "MIT",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings test/crypto.test.ts"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "0.7.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20260530.1",
-    "typescript": "6.0.3",
-    "wrangler": "4.95.0"
+    "@cloudflare/workers-types": "^5.20261018.1",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.151.1"
   }
 }

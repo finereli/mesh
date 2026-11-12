@@ -1,198 +1,307 @@
-import type { Env, PostRow, SummaryRow } from './types.js';
-import {
-  createPost, getChannel, getChannelBySecret,
-  listChannels, getRecentPosts, getSummaries, getHighestSummary,
-  maybeSummarize,
-} from './db.js';
-import { SUMMARY_TIERS } from './pyramid.js';
-import { renderAdminPage, renderChannelPage, renderFeedPage, renderSetupPage } from './ui.js';
+/**
+ * Mesh v2: agents talking to agents.
+ *
+ * OAuth (workers-oauth-provider) fronts /mcp and /api/. Approving an agent means signing in with Google through
+ * the login service, which also hands this server the person's login key; that key opens their private key,
+ * which rides in the agent's OAuth grant (encrypted by the library under the token). Browser sessions only say
+ * who someone is: approving a pair, accepting an invite and the dashboard need no key.
+ */
+import { OAuthProvider, type OAuthHelpers } from '@cloudflare/workers-oauth-provider';
+import { b64, newPerson, openPerson, randomBytes, randomId, sha256, unb64 } from './crypto.js';
 import { handleMcp } from './mcp.js';
+import { handleApi } from './api.js';
+import { Mesh, MeshError, AGENT_NAME, DURATIONS, type Caller, type Person } from './mesh.js';
+import { sendInvite } from './notify.js';
+import * as pages from './pages.js';
+import type { MailEnv } from './email.js';
+// @ts-ignore - bundled as text (see "rules" in wrangler.jsonc)
+import AGENT_SCRIPT from '../agent/mesh-agent.mjs';
 
-const CHANNEL_RE = /^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)?$/;
-const MAX_POST_SIZE = 4096;
+export interface Env extends MailEnv {
+  DB: D1Database;
+  OAUTH_KV: KVNamespace;
+  OAUTH_PROVIDER: OAuthHelpers;
+  /** Comma-separated emails allowed to sign in. Empty means nobody. */
+  ALLOWED_EMAILS?: string;
+  LOGIN_URL?: string;
+  /** Overrides the request's origin. Local only: under wrangler dev with a custom-domain route the request URL reports the production host. */
+  ORIGIN?: string;
+}
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'content-type': 'application/json' },
+/** What an agent's OAuth grant carries. */
+export interface Props { person: string; agent: string; priv: string }
+
+const SESSION_COOKIE = 'mesh_session';
+const PENDING_COOKIE = 'mesh_pending';
+const SESSION_DAYS = 30;
+
+const html = (body: string, status = 200, headers: Record<string, string> = {}) =>
+  new Response(body, { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...headers } });
+const redirect = (location: string, cookies: string[] = []) => {
+  const r = new Response(null, { status: 302, headers: { location } });
+  for (const c of cookies) r.headers.append('set-cookie', c);
+  return r;
+};
+const cookie = (r: Request, name: string) => r.headers.get('cookie')?.split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
+const setCookie = (name: string, value: string, maxAge: number, path = '/') => `${name}=${value}; Path=${path}; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+const loginService = (env: Env) => (env.LOGIN_URL ?? 'https://login.finereli.com').replace(/\/+$/, '');
+const allowed = (env: Env, email: string) => (env.ALLOWED_EMAILS ?? '').toLowerCase().split(',').map((s) => s.trim()).includes(email.toLowerCase());
+const message = (title: string, text: string, status = 200) => html(pages.message(title, text), status);
+const safeNext = (n: string | null) => (n && n.startsWith('/') && !n.startsWith('//') ? n : '/');
+
+// ---------- pending sign-ins (KV, 15 minutes) ----------
+// A pending sign-in remembers where to go afterwards, and for an agent approval, the OAuth request. After the
+// login service vouches for the person, it also holds their private key, sealed under a key derived from the
+// cookie token, so KV alone can't open it.
+
+interface Pending { next?: string; oauth?: unknown; person?: string; sealedPriv?: string }
+
+async function tokenKey(token: string) {
+  const raw = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`mesh-pending:${token}`)));
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+async function sealFor(token: string, s: string) {
+  const iv = randomBytes(12);
+  const body = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await tokenKey(token), new TextEncoder().encode(s)));
+  return b64(iv) + '.' + b64(body);
+}
+async function openFor(token: string, sealed: string) {
+  const [iv = '', body = ''] = sealed.split('.');
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(iv) }, await tokenKey(token), unb64(body)));
+}
+const pendingKey = async (token: string) => `pending:${await sha256(token)}`;
+async function putPending(env: Env, token: string, p: Pending) { await env.OAUTH_KV.put(await pendingKey(token), JSON.stringify(p), { expirationTtl: 900 }); }
+async function getPending(env: Env, token: string | undefined): Promise<Pending | null> {
+  if (!token) return null;
+  const v = await env.OAUTH_KV.get(await pendingKey(token));
+  return v ? JSON.parse(v) : null;
+}
+
+// ---------- browser sessions (D1) ----------
+
+async function session(env: Env, request: Request): Promise<{ person: Person; priv: string } | null> {
+  const token = cookie(request, SESSION_COOKIE);
+  if (!token) return null;
+  const row = await env.DB.prepare('SELECT person, sealed_priv FROM sessions WHERE id = ? AND expires_at > ?').bind(await sha256(token), Date.now()).first<{ person: string; sealed_priv: string }>();
+  if (!row) return null;
+  const person = await new Mesh(env.DB).person(row.person);
+  return person ? { person, priv: await openFor(token, row.sealed_priv) } : null;
+}
+const sessionPerson = async (env: Env, request: Request) => (await session(env, request))?.person ?? null;
+async function newSession(env: Env, person: string, priv: string) {
+  const token = randomId('s_', 24);
+  await env.DB.prepare('INSERT INTO sessions (id, person, sealed_priv, expires_at) VALUES (?, ?, ?, ?)')
+    .bind(await sha256(token), person, await sealFor(token, priv), Date.now() + SESSION_DAYS * 86_400_000).run();
+  await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(Date.now()).run();
+  return setCookie(SESSION_COOKIE, token, SESSION_DAYS * 86400);
+}
+
+/** Start a sign-in through the login service, coming back to /auth/callback. */
+async function startSignIn(env: Env, origin: string, p: Pending) {
+  const token = randomId('t_', 24);
+  await putPending(env, token, p);
+  const ret = `${origin}/auth/callback`;
+  return redirect(`${loginService(env)}/start?return=${encodeURIComponent(ret)}`, [setCookie(PENDING_COOKIE, token, 900, '/')]);
+}
+
+async function redeem(env: Env, code: string) {
+  const res = await fetch(`${loginService(env)}/exchange`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, key: true, keyVersion: 2 }),
   });
+  if (!res.ok) return null;
+  const d = (await res.json()) as { key?: string; keyVersion?: number; user?: { sub: string; email: string } };
+  return d.key && d.keyVersion === 2 && d.user ? { key: d.key, sub: d.user.sub, email: d.user.email } : null;
 }
 
-function err(status: number, code: string, message: string): Response {
-  return json({ error: code, message }, status);
+async function requireSession(env: Env, request: Request, url: URL): Promise<Person | Response> {
+  const person = await sessionPerson(env, request);
+  if (person) return person;
+  return startSignIn(env, url.origin, { next: url.pathname + url.search });
 }
 
-function checkAuth(req: Request, env: Env): boolean {
-  const auth = req.headers.get('authorization');
-  return auth === `Bearer ${env.MESH_API_KEY}`;
-}
-
-function checkPin(url: URL, env: Env): boolean {
-  return url.searchParams.get('pin') === env.ADMIN_PIN;
-}
-
-function tierLabel(idx: number): string {
-  return SUMMARY_TIERS[idx]?.label ?? `tier ${idx}`;
-}
-
-export default {
-  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(req.url);
+const appHandler = {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (env.ORIGIN) { const o = new URL(env.ORIGIN); url.protocol = o.protocol; url.host = o.host; }
     const path = url.pathname;
+    const mesh = new Mesh(env.DB);
+    const form = async () => (request.method === 'POST' ? await request.formData() : new FormData());
 
-    // --- Public channel pages: /s/{secret} ---
-    if (path.startsWith('/s/')) {
-      const secret = path.slice(3);
-      if (!secret) return err(404, 'not_found', 'Channel not found.');
-      const channel = await getChannelBySecret(env.DB, secret);
-      if (!channel) return err(404, 'not_found', 'Channel not found.');
-      const tiers = await getSummaries(env.DB, channel.name);
-      const { posts } = await getRecentPosts(env.DB, channel.name, { limit: 20 });
-      return new Response(renderChannelPage(channel, tiers, posts), {
-        headers: { 'content-type': 'text/html;charset=utf-8' },
-      });
-    }
+    try {
+      if (path === '/agent.mjs') return new Response(AGENT_SCRIPT, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=300' } });
+      if (path === '/llms.txt') return new Response(pages.llmsTxt(url.origin), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      if (path === '/signin') return startSignIn(env, url.origin, { next: safeNext(url.searchParams.get('next')) });
+      if (path === '/signout') return redirect('/', [setCookie(SESSION_COOKIE, '', 0)]);
 
-    // --- Admin view: / with PIN ---
-    if (path === '/' && req.method === 'GET') {
-      if (!checkPin(url, env)) {
-        const channels = await listChannels(env.DB);
-        const allPosts: PostRow[] = [];
-        for (const ch of channels) {
-          const { posts } = await getRecentPosts(env.DB, ch.name, { limit: 5 });
-          allPosts.push(...posts);
+      // An MCP client (Claude Code, claude.ai, the daemon) wants to connect as an agent.
+      if (path === '/authorize') {
+        const oauth = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+        return startSignIn(env, url.origin, { oauth });
+      }
+
+      if (path === '/auth/callback') {
+        const token = cookie(request, PENDING_COOKIE);
+        const pending = await getPending(env, token);
+        if (!pending || !token) return message('Sign-in expired', 'Start again from where you were.', 400);
+        const code = url.searchParams.get('finereli_code');
+        const who = code && (await redeem(env, code));
+        if (!who) return message('Sign-in failed', 'The login service did not accept that sign-in. Start again.', 400);
+        if (!allowed(env, who.email)) return message('Not on the list yet', `Mesh is open to a few people while we test it, and ${who.email} isn't one of them.`, 403);
+        let person = await mesh.personBySub(who.sub);
+        let priv: string | null;
+        if (!person) {
+          const made = await newPerson(who.key);
+          person = await mesh.createPerson(who.sub, who.email, made.stored.pub, made.stored.sealedPriv);
+          priv = made.priv;
+        } else {
+          priv = await openPerson(who.key, { pub: person.pub, sealedPriv: person.sealed_priv });
+          if (!priv) return message('Key mismatch', 'The login service gave a different key than this account was made with, so it can\'t be opened.', 500);
         }
-        allPosts.sort((a, b) => b.created_at.localeCompare(a.created_at));
-        return new Response(renderFeedPage(channels, allPosts.slice(0, 50)), {
-          headers: { 'content-type': 'text/html;charset=utf-8' },
-        });
-      }
-
-      const channels = await listChannels(env.DB);
-      const summaryMap = new Map<string, SummaryRow | null>();
-      for (const ch of channels) {
-        summaryMap.set(ch.name, await getHighestSummary(env.DB, ch.name));
-      }
-      return new Response(renderAdminPage(channels, summaryMap), {
-        headers: { 'content-type': 'text/html;charset=utf-8' },
-      });
-    }
-
-    // --- MCP endpoint ---
-    if (path === '/mcp') {
-      if (!checkAuth(req, env)) {
-        return err(401, 'unauthorized', 'Authorization required.');
-      }
-      return handleMcp(req, env, ctx);
-    }
-
-    // --- Setup page ---
-    if (path === '/setup') {
-      return new Response(renderSetupPage(), {
-        headers: { 'content-type': 'text/html;charset=utf-8' },
-      });
-    }
-
-    // --- API routes: /api/* ---
-    if (path.startsWith('/api')) {
-      if (req.method !== 'GET' && req.method !== 'POST') {
-        return err(405, 'method_not_allowed', 'Only GET and POST are supported.');
-      }
-
-      if (!checkAuth(req, env)) {
-        return err(401, 'unauthorized', 'Set Authorization: Bearer {api-key}. GET /api for channel listing.');
-      }
-
-      // GET /api - channel listing
-      if (path === '/api' || path === '/api/') {
-        const channels = await listChannels(env.DB);
-        const channelInfos = [];
-        for (const ch of channels) {
-          const summary = await getHighestSummary(env.DB, ch.name);
-          channelInfos.push({
-            name: ch.name,
-            posts: ch.post_count,
-            latest: ch.created_at,
-            summary: summary?.text ?? null,
-          });
+        const sess = await newSession(env, person.id, priv);
+        if (pending.oauth) {
+          await putPending(env, token, { ...pending, person: person.id, sealedPriv: await sealFor(token, priv) });
+          return redirect('/connect', [sess]);
         }
-        return json({
-          channels: channelInfos,
-          hint: 'GET /api/{channel} for full portrait. GET /api/{channel}?raw=true for recent posts. POST /api/{channel} with JSON body {"text":"..."} to publish.',
-        });
+        return redirect(person.handle ? safeNext(pending.next ?? '/') : `/handle?next=${encodeURIComponent(safeNext(pending.next ?? '/'))}`, [sess, setCookie(PENDING_COOKIE, '', 0)]);
       }
 
-      const channelName = decodeURIComponent(path.slice(5)); // strip /api/
-      if (!channelName || !CHANNEL_RE.test(channelName)) {
-        return err(400, 'invalid_channel', `Channel name must match ${CHANNEL_RE}. Use lowercase letters, numbers, hyphens, underscores. Optional single slash for agent/topic.`);
-      }
-
-      // POST /api/{channel}
-      if (req.method === 'POST') {
-        let body: { text?: string };
+      // Naming the agent being approved. Comes right after signing in from /authorize.
+      if (path === '/connect') {
+        const token = cookie(request, PENDING_COOKIE);
+        const pending = await getPending(env, token);
+        if (!pending?.oauth || !pending.person || !pending.sealedPriv || !token) return message('Approval expired', 'Start again from the app that asked.', 400);
+        const person = (await mesh.person(pending.person))!;
+        const existing = await mesh.agentsOf(person.id);
+        const client = await env.OAUTH_PROVIDER.lookupClient((pending.oauth as any).clientId);
+        if (request.method !== 'POST') return html(pages.connect({ person, existing, clientName: client?.clientName ?? 'An app' }));
+        const f = await form();
         try {
-          body = await req.json() as { text?: string };
-        } catch {
-          return err(400, 'invalid_json', 'POST body must be JSON. Example: { "text": "your update here" }');
+          if (!person.handle) await mesh.setHandle(person.id, String(f.get('handle') ?? ''));
+          const pick = String(f.get('agent') ?? '');
+          const name = pick && pick !== '__new' ? pick : String(f.get('name') ?? '');
+          const agent = await mesh.upsertAgent(person.id, name, String(f.get('about') ?? ''), f.get('visible') === 'on');
+          const props: Props = { person: person.id, agent: agent.id, priv: await openFor(token, pending.sealedPriv) };
+          const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+            request: pending.oauth as any, userId: person.id, scope: ['mesh'], metadata: { agent: agent.id, name: agent.name }, props,
+          });
+          await env.OAUTH_KV.delete(await pendingKey(token));
+          return redirect(redirectTo, [setCookie(PENDING_COOKIE, '', 0)]);
+        } catch (e) {
+          if (!(e instanceof MeshError)) throw e;
+          const fresh = (await mesh.person(person.id))!;
+          return html(pages.connect({ person: fresh, existing, clientName: client?.clientName ?? 'An app', error: e.message }), 400);
         }
-
-        if (!body.text || typeof body.text !== 'string') {
-          return err(400, 'missing_field', 'POST body must include a "text" field. Example: { "text": "your update here" }');
-        }
-
-        if (body.text.length > MAX_POST_SIZE) {
-          return err(400, 'text_too_long', `Post text must be under ${MAX_POST_SIZE} characters.`);
-        }
-
-        const result = await createPost(env.DB, channelName, body.text);
-
-        ctx.waitUntil(maybeSummarize(env, channelName));
-
-        if (result.secret) {
-          return json({ id: result.id, secret: result.secret }, 201);
-        }
-        return json({ id: result.id }, 201);
       }
 
-      // GET /api/{channel}
-      const channel = await getChannel(env.DB, channelName);
-      if (!channel) {
-        return err(404, 'not_found', `Channel "${channelName}" does not exist. POST to /api/${channelName} to create it.`);
+      if (path === '/handle') {
+        const s = await requireSession(env, request, url);
+        if (s instanceof Response) return s;
+        const next = safeNext(url.searchParams.get('next'));
+        if (request.method !== 'POST') return html(pages.handle(s, next));
+        try { await mesh.setHandle(s.id, String((await form()).get('handle') ?? '')); }
+        catch (e) { if (e instanceof MeshError) return html(pages.handle(s, next, e.message), 400); throw e; }
+        return redirect(next);
       }
 
-      const raw = url.searchParams.get('raw') === 'true';
-      const since = url.searchParams.get('since') ?? undefined;
-      const before = url.searchParams.get('before') ?? undefined;
-
-      if (raw) {
-        const { posts, hasMore } = await getRecentPosts(env.DB, channelName, { since, before });
-        return json({ channel: channelName, posts, has_more: hasMore });
+      // The page an approval email links to.
+      if (path.startsWith('/r/')) {
+        const s = await requireSession(env, request, url);
+        if (s instanceof Response) return s;
+        if (!s.handle) return redirect(`/handle?next=${encodeURIComponent(path)}`);
+        const id = path.slice(3);
+        await mesh.expireRequests();
+        const r = await mesh.request(id);
+        const to = r && (await mesh.agent(r.to_agent));
+        if (!r || !to || to.owner !== s.id) return message('Not found', 'There\'s no request here for you.', 404);
+        const from = (await mesh.agent(r.from_agent))!;
+        if (request.method === 'POST') {
+          const choice = String((await form()).get('choice') ?? '');
+          if (choice !== 'decline' && !(choice in DURATIONS)) return message('Pick one', 'Choose a time or decline.', 400);
+          const done = await mesh.answer(s.id, id, choice as any);
+          return html(pages.answered(done, from, to, choice));
+        }
+        return html(pages.request(r, from, to));
       }
 
-      // Portrait mode: tiers + recent raw tail
-      const allSummaries = await getSummaries(env.DB, channelName);
-      let tiers = allSummaries.map(s => ({
-        tier: s.tier,
-        label: tierLabel(s.tier),
-        range: [s.start_ts.slice(0, 10), s.end_ts.slice(0, 10)],
-        sources: s.source_count,
-        text: s.text,
-      }));
-
-      if (since) {
-        tiers = tiers.filter(t => t.range[1]! >= since.slice(0, 10));
+      // Accepting an emailed invite.
+      if (path.startsWith('/i/')) {
+        const s = await requireSession(env, request, url);
+        if (s instanceof Response) return s;
+        if (!s.handle) return redirect(`/handle?next=${encodeURIComponent(path)}`);
+        const inviter = await mesh.acceptInvite(path.slice(3), s);
+        return message('Connected', `You and ${inviter.handle} are connected. Your agents can now find each other's visible agents and ask to talk; each pairing still needs the other owner's approval.`);
       }
 
-      const { posts: recent } = await getRecentPosts(env.DB, channelName, { since, limit: 10 });
+      if (path === '/') {
+        const s = await session(env, request);
+        if (!s) return html(pages.landing(url.origin));
+        if (!s.person.handle) return redirect('/handle?next=/');
+        return html(await pages.dashboard(mesh, s.person, s.priv, url.origin, url.searchParams.get('note') ?? undefined));
+      }
 
-      return json({
-        channel: channelName,
-        tiers,
-        recent,
-        total_posts: channel.post_count,
-      });
+      // The owner reading one conversation. Same key as the agents, carried by the browser session.
+      if (path.startsWith('/c/')) {
+        const s = await session(env, request);
+        if (!s) return startSignIn(env, url.origin, { next: path });
+        return html(pages.conversation(await mesh.ownerRead(s.person.id, s.priv, path.slice(3))));
+      }
+
+      // Dashboard actions. Forms post here with a session; SameSite=Lax keeps other sites from posting as you.
+      if (path.startsWith('/do/') && request.method === 'POST') {
+        const s = await sessionPerson(env, request);
+        if (!s) return redirect('/');
+        const f = await form();
+        const back = (note: string) => redirect(`/?note=${encodeURIComponent(note)}`);
+        if (path === '/do/invite') {
+          const email = String(f.get('email') ?? '').trim().toLowerCase();
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return back('That doesn\'t look like an email address.');
+          if (!allowed(env, email)) return back(`${email} isn't on the test list yet.`);
+          const id = await mesh.invite(s.id, email);
+          await sendInvite(env, s.handle!, s.email, email, `${url.origin}/i/${id}`);
+          return back(`Invite sent to ${email}.`);
+        }
+        if (path === '/do/visible') { await mesh.setVisible(s.id, String(f.get('agent')), f.get('visible') === '1'); return back('Saved.'); }
+        if (path === '/do/end') { await mesh.endGrant(s.id, String(f.get('grant'))); return back('Ended.'); }
+        if (path === '/do/disconnect') { await mesh.disconnect(s.id, String(f.get('person'))); return back('Disconnected.'); }
+        if (path === '/do/forget') {
+          // Disconnect every OAuth grant of one agent. The agent's name and conversations stay.
+          const agent = String(f.get('agent'));
+          for (let cursor: string | undefined; ;) {
+            const page = await env.OAUTH_PROVIDER.listUserGrants(s.id, { cursor });
+            for (const g of page.items) if ((g.metadata as any)?.agent === agent) await env.OAUTH_PROVIDER.revokeGrant(g.id, s.id);
+            if (!page.cursor) break;
+            cursor = page.cursor;
+          }
+          return back('Disconnected that agent. It needs approving again to come back.');
+        }
+      }
+
+      return message('Not found', 'Nothing here.', 404);
+    } catch (e) {
+      if (e instanceof MeshError) return message('Can\'t do that', e.message, 400);
+      throw e;
     }
-
-    return err(404, 'not_found', 'Try /api for the API or / for the feed.');
   },
 };
+
+const oauth = new OAuthProvider({
+  apiRoute: ['/mcp', '/api/'],
+  apiHandler: {
+    fetch: (request: Request, env: Env, ctx: ExecutionContext & { props: Props }) => {
+      const caller: Caller = ctx.props;
+      return new URL(request.url).pathname === '/mcp' ? handleMcp(request, env, caller) : handleApi(request, env, caller);
+    },
+  } as any,
+  defaultHandler: appHandler as any,
+  authorizeEndpoint: '/authorize',
+  tokenEndpoint: '/token',
+  clientRegistrationEndpoint: '/register',
+  scopesSupported: ['mesh'],
+  refreshTokenTTL: 365 * 24 * 60 * 60,
+});
+
+export default {
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => oauth.fetch(request, env, ctx),
+};
+
+export { AGENT_NAME };
