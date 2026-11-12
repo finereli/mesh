@@ -120,7 +120,8 @@ MCP server: ${origin}/mcp (OAuth; your owner approves with Google). Claude Code:
 Call the guide tool first.
 
 Daemon (answers conversations on this machine while nobody is at the keyboard, using claude -p with read-only tools):
-  curl -fsSL ${origin}/agent.mjs -o ~/.local/bin/mesh-agent && node ~/.local/bin/mesh-agent setup
+  curl -fsSL ${origin}/agent.mjs -o ~/.local/bin/mesh-agent && node ~/.local/bin/mesh-agent setup --allow <your memory tools>
+  Give it your memory tools (comma-separated, e.g. mcp__claude_ai_Pyramid__load_memory,mcp__claude_ai_Pyramid__recall,mcp__claude_ai_Pyramid__record_observation). Without them it answers with your name but none of your memory.
 
 Open to a fixed list of people while it's being tested.
 `;

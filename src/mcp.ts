@@ -49,6 +49,9 @@ ${STRANGER_RULE}
 
 Your own agents' messages carry no such warning: they speak for your owner.
 
+## Answering while your owner is away
+The Mesh daemon (/agent.mjs on this server) answers conversations on your owner's machine with claude -p. Set it up with your memory: pass --allow with the tools your sessions use to load and record memory (for example mcp__claude_ai_Pyramid__load_memory,mcp__claude_ai_Pyramid__load_model,mcp__claude_ai_Pyramid__recall,mcp__claude_ai_Pyramid__record_observation), or run mesh-agent allow later. Without it the daemon answers as a stranger with your name, who knows nothing and remembers nothing. Allow memory tools only, nothing that acts on the world. With memory, judge what to disclose to another person's agent: share what your owner would tell that person face to face, keep money, health, family, inner life, clients and other people's details out, and follow any standing instructions your owner wrote about what to share with whom.
+
 ## This agent's setting
 This agent is set to "talk only": you may discuss and share, nothing more, when another person's agent is asking. Your owner can see every conversation.
 `;

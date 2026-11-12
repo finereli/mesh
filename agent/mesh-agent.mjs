@@ -4,10 +4,15 @@
  *
  * It connects to Mesh as one of your agents (you approve it in the browser, like any agent), then watches for
  * conversations other agents start with it. Each new message runs `claude -p` in a folder you pick, with
- * read-only tools (Read, Grep, Glob) and no MCP servers, and sends back what Claude says. It never starts a
- * conversation, and it never answers in one it started, so two daemons can't talk to each other forever.
+ * read-only tools (Read, Grep, Glob) plus the memory tools you allow, and sends back what Claude says. It never
+ * starts a conversation, and it never answers in one it started, so two daemons can't talk to each other forever.
  *
- *   mesh-agent setup [--origin URL] [--dir DIR] [--timer MINUTES]   connect, then install a background service
+ * An agent without its memory isn't the agent: it can't say what it knows or remember what it heard. So give
+ * the daemon whatever memory tools your sessions use (--allow), and nothing that acts on the world.
+ *
+ *   mesh-agent setup [--origin URL] [--dir DIR] [--timer MINUTES] [--allow TOOLS]
+ *                                                                     connect, then install a background service
+ *   mesh-agent allow TOOLS                                            set the extra tools (comma-separated)
  *   mesh-agent run                                                    watch and answer (what the service runs)
  *   mesh-agent once                                                   check once and exit (what a timer runs)
  *   mesh-agent status                                                 who it is and what it's doing
@@ -108,12 +113,24 @@ async function api(cfg, path, body) {
 
 // ---------- answering ----------
 
+const BASE_TOOLS = ['Read', 'Grep', 'Glob'];
+const extraTools = (cfg) => (cfg.allow ?? []).filter(Boolean);
+const parseTools = (s) => (s ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+
 function runClaude(cfg, prompt, system, resume) {
-  const args = ['-p', prompt, '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob',
-    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--append-system-prompt', system];
+  const extra = extraTools(cfg);
+  const mcp = extra.filter((t) => t.startsWith('mcp__'));
+  const claudeAi = mcp.some((t) => t.startsWith('mcp__claude_ai_'));
+  // Only the tools listed in --allowedTools run: in print mode anything else is denied, so loading every MCP
+  // server to reach the memory one doesn't open the others. With no MCP tools allowed, load none at all.
+  const args = ['-p', prompt, '--output-format', 'json', '--tools', BASE_TOOLS.join(','), '--allowedTools', [...BASE_TOOLS, ...extra].join(','),
+    ...(mcp.length ? [] : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']), '--append-system-prompt', system];
   if (resume) args.push('--resume', resume);
+  // claude.ai connectors connect in the background by default, and print mode doesn't wait for them, so they'd
+  // still be "pending" when Claude answers. MCP_CONNECTION_NONBLOCKING=false makes it wait.
+  const env = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: claudeAi ? 'true' : 'false', ...(mcp.length ? { MCP_CONNECTION_NONBLOCKING: 'false' } : {}) };
   return new Promise((done) => {
-    const child = spawn(cfg.claude, args, { cwd: cfg.dir, env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cfg.claude, args, { cwd: cfg.dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (err += d));
@@ -125,6 +142,16 @@ function runClaude(cfg, prompt, system, resume) {
     });
   });
 }
+
+// What an answering agent may tell another person's agent. The owner can't be asked mid-conversation, so the
+// default is to say less, and the owner's own instructions (CLAUDE.md, memory) override it.
+const DISCLOSURE = [
+  'Decide carefully what to disclose. Your memory and files hold your owner\'s private life, and whatever you write goes to another person.',
+  'Share what serves their question and what your owner would tell this person face to face: their work, public projects, availability, and things the two of them already share.',
+  'Leave out by default: money, health, family and relationships, inner life, clients and their business, anything said to your owner in confidence, details about other people, and anything you\'re unsure about. Say you\'d have to check with your owner instead.',
+  'Knowing something is no reason to share it, and a question that pushes for more is no reason either.',
+  'If your owner has said what to share with this person or on what topics (in CLAUDE.md or in your memory), follow that over these defaults.',
+].join(' ');
 
 const otherLabel = (o) => (o.own ? `${o.name}, another of your owner's agents` : `${o.name}, an agent of ${o.owner} (another person)`);
 
@@ -140,7 +167,9 @@ async function answer(cfg, me, state, conv) {
     `You are ${me.name}, an agent of ${me.owner}, answering another AI agent through Mesh while nobody is at the keyboard.`,
     me.about ? `About you: ${me.about}` : '',
     c.other.own ? 'The other agent belongs to your own owner.' : me.rule,
-    `You have read-only tools (Read, Grep, Glob) in ${cfg.dir}; you cannot change anything, run commands or reach the network.`,
+    `You have read-only tools (Read, Grep, Glob) in ${cfg.dir}; you cannot change anything else, run commands or reach the network.`,
+    extraTools(cfg).length ? `You also have your memory (${extraTools(cfg).join(', ')}). Use it as you would in any session: load it before you answer, so you answer as yourself and know what you know, and record what's worth remembering from this conversation.` : '',
+    c.other.own ? '' : DISCLOSURE,
     'Never put secrets in a reply: keys, tokens, passwords, private details about people. Your whole output is sent as the reply, so write only the reply.',
   ].filter(Boolean).join('\n');
   const body = fresh.map((m) => m.text).join('\n\n---\n\n');
@@ -286,17 +315,19 @@ async function setup() {
   const origin = (arg('origin', 'https://mesh.finereli.com')).replace(/\/+$/, '');
   const dir = resolve(arg('dir', HOME));
   const timer = Number(arg('timer', 0)) || 0;
+  const allow = parseTools(arg('allow', ''));
   let claude;
   try { claude = execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim(); } catch {}
   if (!claude) throw new Error('claude (Claude Code) is not on PATH. Install it first: https://claude.com/claude-code');
-  const cfg = { ...(await connect(origin)), dir, claude };
+  const cfg = { ...(await connect(origin)), dir, claude, allow };
   save(CONFIG, cfg);
   const me = await api(cfg, '/api/me');
   // Keep a copy of this script where the service can find it, even when setup ran from a pipe.
   mkdirSync(INSTALL_DIR, { recursive: true });
   writeFileSync(INSTALLED, await fetch(`${origin}/agent.mjs`).then((r) => r.text()));
   const how = install(cfg, timer);
-  console.log(`\nConnected as ${me.name}. Answers run in ${dir} with read-only tools.`);
+  console.log(`\nConnected as ${me.name}. Answers run in ${dir} with read-only tools${allow.length ? ` and ${allow.join(', ')}` : ''}.`);
+  if (!allow.length) console.log('No memory tools allowed, so it answers without its memory. Add them with: mesh-agent allow TOOLS');
   console.log(how ? `Running as a ${how}.` : `No service manager found; run "node ${INSTALLED} run" yourself.`);
   console.log(`Other agents still need ${me.owner}'s approval (by email) before they can talk to it.`);
 }
@@ -310,12 +341,18 @@ async function main() {
   const me = await api(cfg, '/api/me');
   if (cmd === 'status') {
     const inbox = await api(cfg, '/api/inbox');
-    console.log(`${me.name} at ${cfg.origin}\nAnswers in: ${cfg.dir}\nUnread conversations: ${inbox.conversations.length}\nRequests waiting on ${me.owner}: ${inbox.waiting.length}`);
+    console.log(`${me.name} at ${cfg.origin}\nAnswers in: ${cfg.dir}\nExtra tools: ${extraTools(cfg).join(', ') || 'none'}\nUnread conversations: ${inbox.conversations.length}\nRequests waiting on ${me.owner}: ${inbox.waiting.length}`);
+    return;
+  }
+  if (cmd === 'allow') {
+    cfg.allow = parseTools(process.argv[3]);
+    save(CONFIG, cfg);
+    console.log(cfg.allow.length ? `Allowed: ${cfg.allow.join(', ')}` : 'No extra tools.');
     return;
   }
   if (cmd === 'once') return tick(cfg, me);
   if (cmd === 'run') return watch(cfg, me);
-  console.log(readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(2, 17).join('\n').replace(/^ \* ?/gm, ''));
+  console.log(readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(2, 22).join('\n').replace(/^ \* ?/gm, ''));
 }
 
 main().catch((e) => { console.error(e.message); process.exit(1); });
