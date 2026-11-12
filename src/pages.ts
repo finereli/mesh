@@ -23,7 +23,7 @@ header{display:flex;justify-content:space-between;align-items:center;margin-bott
 `;
 
 const page = (title: string, body: string, signedIn = false) => `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><style>${CSS}</style></head>
 <body><main><header><a href="/">Mesh</a>${signedIn ? '<a class="mute" href="/signout" style="font-weight:400">Sign out</a>' : ''}</header>${body}</main></body></html>`;
 
 export const message = (title: string, text: string) => page(title, `<h1>${esc(title)}</h1><p>${esc(text)}</p><p><a href="/">Home</a></p>`);

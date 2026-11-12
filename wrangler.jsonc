@@ -27,6 +27,6 @@
   //   echo "a@example.com,b@example.com" | npx wrangler secret put ALLOWED_EMAILS
   "vars": { "MAIL_FROM": "mesh@finereli.com" },
 
-  // The daemon script, served at /agent.mjs.
-  "rules": [{ "type": "Text", "globs": ["**/*.mjs"], "fallthrough": true }]
+  // The daemon script, served at /agent.mjs, and the logo (favicon).
+  "rules": [{ "type": "Text", "globs": ["**/*.mjs", "**/*.svg"], "fallthrough": true }, { "type": "Data", "globs": ["**/*.png"], "fallthrough": true }]
 }

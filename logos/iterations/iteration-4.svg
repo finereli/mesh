@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#fbfaf7"/>
+  <g id="icon" stroke-linecap="round">
+    <g id="mesh" stroke="#c9d9d2" stroke-width="26">
+      <line x1="256" y1="128" x2="136" y2="336"/>
+      <line x1="256" y1="128" x2="376" y2="336"/>
+    </g>
+    <line id="pair" x1="136" y1="336" x2="376" y2="336" stroke="#2f5d50" stroke-width="40"/>
+    <g id="nodes">
+      <circle cx="256" cy="128" r="40" fill="#7fb8a4"/>
+      <circle cx="136" cy="336" r="60" fill="#2f5d50"/>
+      <circle cx="376" cy="336" r="60" fill="#2f5d50"/>
+    </g>
+  </g>
+</svg>

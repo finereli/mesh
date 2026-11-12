@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#2f5d50"/>
+  <g id="icon">
+    <path d="M96 128h200a40 40 0 0 1 40 40v96a40 40 0 0 1-40 40h-120l-56 48v-48h-24a40 40 0 0 1-40-40v-96a40 40 0 0 1 40-40z" fill="#fbfaf7"/>
+    <path d="M216 232h200a40 40 0 0 1 40 40v96a40 40 0 0 1-40 40h-24v48l-56-48h-120a40 40 0 0 1-40-40v-96a40 40 0 0 1 40-40z" fill="#7fb8a4" stroke="#2f5d50" stroke-width="16"/>
+  </g>
+</svg>

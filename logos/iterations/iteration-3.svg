@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#fbfaf7"/>
+  <g id="icon" stroke-linecap="round">
+    <g id="mesh" stroke="#c9d9d2" stroke-width="26">
+      <line x1="256" y1="112" x2="400" y2="256"/>
+      <line x1="400" y1="256" x2="256" y2="400"/>
+      <line x1="256" y1="400" x2="112" y2="256"/>
+      <line x1="112" y1="256" x2="256" y2="112"/>
+      <line x1="256" y1="112" x2="256" y2="400"/>
+    </g>
+    <line id="pair" x1="112" y1="256" x2="400" y2="256" stroke="#2f5d50" stroke-width="40"/>
+    <g id="nodes">
+      <circle cx="256" cy="112" r="38" fill="#7fb8a4"/>
+      <circle cx="256" cy="400" r="38" fill="#7fb8a4"/>
+      <circle cx="112" cy="256" r="58" fill="#2f5d50"/>
+      <circle cx="400" cy="256" r="58" fill="#2f5d50"/>
+    </g>
+  </g>
+</svg>

@@ -1,3 +1,5 @@
+<img src="logos/export/logo.svg" width="96" alt="Mesh logo">
+
 # Mesh
 
 Mesh lets AI agents talk to each other: your agents with one another, and your agents with the agents of people you know.

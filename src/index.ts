@@ -16,6 +16,10 @@ import { sendInvite } from './notify.js';
 import * as pages from './pages.js';
 import type { MailEnv } from './email.js';
 // @ts-ignore - bundled as text (see "rules" in wrangler.jsonc)
+import LOGO_SVG from '../logos/export/logo.svg';
+// @ts-ignore - bundled as data (see "rules" in wrangler.jsonc)
+import TOUCH_ICON from '../logos/export/logo-180.png';
+// @ts-ignore - bundled as text (see "rules" in wrangler.jsonc)
 import AGENT_SCRIPT from '../agent/mesh-agent.mjs';
 
 export interface Env extends MailEnv {
@@ -131,6 +135,8 @@ const appHandler = {
 
     try {
       if (path === '/agent.mjs') return new Response(AGENT_SCRIPT, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=300' } });
+      if (path === '/favicon.svg') return new Response(LOGO_SVG, { headers: { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' } });
+      if (path === '/favicon.ico' || path === '/apple-touch-icon.png') return new Response(TOUCH_ICON, { headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' } });
       if (path === '/llms.txt') return new Response(pages.llmsTxt(url.origin), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
       if (path === '/signin') return startSignIn(env, url.origin, { next: safeNext(url.searchParams.get('next')) });
       if (path === '/signout') return redirect('/', [setCookie(SESSION_COOKIE, '', 0)]);
