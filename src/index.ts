@@ -10,6 +10,7 @@ import { OAuthProvider, type OAuthHelpers } from '@cloudflare/workers-oauth-prov
 import { b64, newPerson, openPerson, randomBytes, randomId, sha256, unb64 } from './crypto.js';
 import { handleMcp } from './mcp.js';
 import { handleApi } from './api.js';
+import { Hub, meshFor } from './hub.js';
 import { Mesh, MeshError, AGENT_NAME, DURATIONS, type Caller, type Person } from './mesh.js';
 import { sendInvite } from './notify.js';
 import * as pages from './pages.js';
@@ -19,6 +20,7 @@ import AGENT_SCRIPT from '../agent/mesh-agent.mjs';
 
 export interface Env extends MailEnv {
   DB: D1Database;
+  HUB: DurableObjectNamespace<Hub>;
   OAUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
   /** Comma-separated emails allowed to sign in. Empty means nobody. */
@@ -84,7 +86,7 @@ async function session(env: Env, request: Request): Promise<{ person: Person; pr
   if (!token) return null;
   const row = await env.DB.prepare('SELECT person, sealed_priv FROM sessions WHERE id = ? AND expires_at > ?').bind(await sha256(token), Date.now()).first<{ person: string; sealed_priv: string }>();
   if (!row) return null;
-  const person = await new Mesh(env.DB).person(row.person);
+  const person = await meshFor(env).person(row.person);
   return person ? { person, priv: await openFor(token, row.sealed_priv) } : null;
 }
 const sessionPerson = async (env: Env, request: Request) => (await session(env, request))?.person ?? null;
@@ -124,7 +126,7 @@ const appHandler = {
     const url = new URL(request.url);
     if (env.ORIGIN) { const o = new URL(env.ORIGIN); url.protocol = o.protocol; url.host = o.host; }
     const path = url.pathname;
-    const mesh = new Mesh(env.DB);
+    const mesh = meshFor(env);
     const form = async () => (request.method === 'POST' ? await request.formData() : new FormData());
 
     try {
@@ -289,6 +291,12 @@ const oauth = new OAuthProvider({
   apiHandler: {
     fetch: (request: Request, env: Env, ctx: ExecutionContext & { props: Props }) => {
       const caller: Caller = ctx.props;
+      if (new URL(request.url).pathname === '/api/stream') {
+        // A daemon's websocket, handed to its owner's Hub once the token checks out.
+        const url = new URL(request.url);
+        url.search = `?agent=${encodeURIComponent(caller.agent)}`;
+        return env.HUB.get(env.HUB.idFromName(caller.person)).fetch(new Request(url, request));
+      }
       return new URL(request.url).pathname === '/mcp' ? handleMcp(request, env, caller) : handleApi(request, env, caller);
     },
   } as any,
@@ -304,4 +312,4 @@ export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => oauth.fetch(request, env, ctx),
 };
 
-export { AGENT_NAME };
+export { AGENT_NAME, Hub };

@@ -9,3 +9,4 @@ Agents talking to agents. Cloudflare Worker + D1 + KV at mesh.finereli.com. READ
 - Under wrangler dev the custom-domain route makes request URLs report the production host; `.dev.vars` sets ORIGIN to fix that.
 - The login service is finereli/finereli-login; mesh asks for `keyVersion: 2` (never the leaked v1 secret).
 - `claude -p --mcp-config` needs `{"mcpServers":{}}`; a bare `{}` is rejected.
+- New messages reach daemons and waiting asks through src/hub.ts (one Durable Object per person, hibernating websockets). Mesh works without it (`new Mesh(db)` polls), which is what the unit tests use.

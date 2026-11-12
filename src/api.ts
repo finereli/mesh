@@ -5,12 +5,13 @@
 import { Mesh, MeshError, fullName, type AgentRow, type Caller } from './mesh.js';
 import { GUIDE, STRANGER_RULE } from './mcp.js';
 import type { Env } from './index.js';
+import { meshFor } from './hub.js';
 
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'cache-control': 'no-store' } });
 const agentJson = (a: AgentRow, caller: Caller) => ({ name: fullName(a), owner: a.handle, own: a.owner === caller.person, about: a.about });
 
 export async function handleApi(request: Request, env: Env, caller: Caller): Promise<Response> {
-  const mesh = new Mesh(env.DB);
+  const mesh = meshFor(env);
   const path = new URL(request.url).pathname;
   try {
     await mesh.touch(caller.agent);

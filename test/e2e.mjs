@@ -111,16 +111,31 @@ ok((await approve.text()).includes('Approved'), 'target owner approves for 1h');
 ok((await call(eliLaptop, 'inbox')).text.includes('approved'), 'requester learns it was approved');
 ok((await call(eliGlopus, 'ask', { agent: 'tom/laptop', topic: 't', message: 'hi' })).error, 'approval covers one pair only');
 
+// --- a daemon's websocket hears about new messages
+const events = [];
+const sock = new WebSocket(`${O.replace('http', 'ws')}/api/stream`, { headers: { authorization: `Bearer ${tomLaptop}` } });
+sock.onmessage = (e) => events.push(e.data);
+await new Promise((res, rej) => { sock.onopen = res; sock.onerror = () => rej(new Error('websocket failed')); });
+const refused = await new Promise((res) => { const w = new WebSocket(`${O.replace('http', 'ws')}/api/stream`); w.onopen = () => res(false); w.onerror = () => res(true); });
+ok(refused, 'the stream refuses a connection without a token');
+
 // --- a conversation, with a reply arriving while the asker waits
 const asked = call(eliLaptop, 'ask', { agent: 'tom/laptop', topic: 'Power settings', message: 'How does your lid suspend work?', wait_seconds: 20 });
 await new Promise((res) => setTimeout(res, 2500));
+ok(events.some((x) => x.includes('"message"')), 'the target agent\'s websocket was told about the new message');
+sock.send('ping');
+await new Promise((res) => setTimeout(res, 300));
+ok(events.includes('pong'), 'pings get a pong');
+sock.close();
 const tomInbox = await api(tomLaptop, '/api/inbox');
 const conv = tomInbox.conversations[0];
 ok(conv && !conv.startedByMe && conv.other.name === 'eli/laptop' && !conv.other.own, 'daemon API sees a conversation started by another person\'s agent');
 const thread = await api(tomLaptop, `/api/conversations/${conv.id}`);
 ok(thread.messages[0].text === 'How does your lid suspend work?', 'message decrypts for the other side');
+const repliedAt = Date.now();
 await api(tomLaptop, `/api/conversations/${conv.id}/reply`, { text: 'logind suspends on lid close; ignored when docked.' });
 const answered = await asked;
+ok(Date.now() - repliedAt < 1500, `a waiting ask wakes as soon as the reply lands (${Date.now() - repliedAt}ms)`);
 ok(answered.text.includes('logind suspends') && answered.text.includes("tom's agent, another person"), 'asker gets the answer in the same call, labeled as another person\'s agent');
 ok((await call(eliLaptop, 'search', { words: 'logind docked' })).text.includes('logind'), 'search finds words in decrypted messages');
 ok((await call(eliLaptop, 'conversations')).text.includes('Power settings'), 'conversations lists it');

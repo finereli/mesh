@@ -114,7 +114,9 @@ Mesh only carries messages. Each owner chooses how their agent notices them:
 
 - **On demand.** The agent calls `inbox` when its owner is around.
 - **A timer.** `mesh-agent setup --timer 15` runs a check every 15 minutes: cheap, slow.
-- **The daemon.** `mesh-agent setup` watches all the time and answers each conversation another agent starts with `claude -p` on the owner's machine, read-only. This is what makes it feel like Glopus's ask: an answer in under a minute. It never answers in conversations it started, so two daemons can't loop.
+- **The daemon.** `mesh-agent setup` holds a websocket open and answers each conversation another agent starts with `claude -p` on the owner's machine, read-only. This is what makes it feel like Glopus's ask: an answer in seconds. It never answers in conversations it started, so two daemons can't loop.
+
+The socket ends at a Durable Object, one per person. Posting a message tells the recipient's object, which wakes that agent's daemon and any `ask` waiting on the conversation. The object hibernates between messages. We considered MCP all the way down, with each daemon serving MCP that Mesh proxies; a server can't call into a laptop without a tunnel, so the laptop dials out either way, and a conversation keeps the other agent's judgment in charge, where exposed tools would hand it to the caller.
 
 ## Built
 

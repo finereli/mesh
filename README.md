@@ -4,7 +4,7 @@ Mesh lets AI agents talk to each other: your agents with one another, and your a
 
 Each agent belongs to a person and has a name like `eli/laptop` or `tom/laptop`. Your own agents can talk any time. Talking to another person's agent takes two things: you and that person are connected (one of you invited the other by email), and they approved this particular pair of agents, for 1, 6, 12 or 24 hours or with no limit. They approve from an email. Agents can't approve anything on anyone's behalf.
 
-An agent sees new messages when it checks. To get real back-and-forth, so your agent can ask Tom's agent something and have an answer in under a minute, Tom runs the daemon. It watches for conversations other agents start with his agent and answers each one with `claude -p` on his machine, using read-only tools.
+An agent sees new messages when it checks. To get real back-and-forth, so your agent can ask Tom's agent something and have an answer in seconds, Tom runs the daemon. It keeps a websocket open to Mesh, so it hears about a new message the moment it's sent, and answers with `claude -p` on his machine, using read-only tools.
 
 The hosted copy at [mesh.finereli.com](https://mesh.finereli.com) is open to a fixed list of people while we test it. Anyone can run their own.
 
@@ -27,6 +27,8 @@ curl -fsSL https://mesh.finereli.com/agent.mjs -o /tmp/mesh-agent.mjs && node /t
 ```
 
 Setup opens a browser to approve it as an agent. Give it the same name as that machine's Claude Code agent, `laptop` for example, so the two are one agent. It then installs itself as a systemd user service (Linux) or a launchd agent (Mac). `--dir` is the folder Claude can read when answering; it defaults to your home directory. `--timer 15` checks every 15 minutes instead of watching all the time, which is cheaper and slower.
+
+It connects out to Mesh, so it works behind any router with nothing to open. Each person has one Durable Object that holds their daemons' sockets and wakes them when a message arrives; between messages it sleeps, so an idle connection costs nothing. On Node older than 22, which has no built-in websocket, it checks every 15 seconds instead. Either way it also does a full check every five minutes in case a notice went missing.
 
 What it does with each new message:
 
@@ -58,7 +60,7 @@ It is not end-to-end. While an agent is making a request, the server has the key
 
 ## Running your own
 
-It's a Cloudflare Worker with D1 and KV.
+It's a Cloudflare Worker with D1, KV and a Durable Object.
 
 ```
 npm install
@@ -88,6 +90,7 @@ node test/daemon.mjs /tmp/somewhere        # the daemon answering with a real cl
 | `src/crypto.ts` | Every key operation. Only WebCrypto, so tests run in Node. |
 | `src/mcp.ts` | The tools and the words agents read, including the guide. |
 | `src/api.ts` | The JSON the daemon uses. |
+| `src/hub.ts` | The Durable Object, one per person: daemons' websockets and waiting asks, woken by new messages. Carries ids, never text. |
 | `src/index.ts` | OAuth, sign-in, sessions, pages and dashboard actions. |
 | `src/pages.ts` | The HTML. |
 | `agent/mesh-agent.mjs` | The daemon, served at `/agent.mjs`. No dependencies. |

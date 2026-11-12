@@ -28,8 +28,15 @@ export const isLive = (g: Grant, t = now()) => !g.ended_at && (g.ends_at === nul
 export const HANDLE = /^[a-z][a-z0-9-]{1,19}$/;
 export const AGENT_NAME = /^[a-z][a-z0-9-]{0,29}$/;
 
+/** How Mesh tells the outside world something happened (the Hub, in production). Optional, so tests can skip it. */
+export interface Events {
+  message(person: string, agent: string, conversation: string, at: number): Promise<void>;
+  nudge(person: string, agent: string): Promise<void>;
+  wait(person: string, agent: string, conversation: string, after: number, ms: number): Promise<boolean>;
+}
+
 export class Mesh {
-  constructor(private db: D1Database) {}
+  constructor(private db: D1Database, private events?: Events) {}
 
   private one<T>(sql: string, ...args: unknown[]) { return this.db.prepare(sql).bind(...args).first<T>(); }
   private all<T>(sql: string, ...args: unknown[]) { return this.db.prepare(sql).bind(...args).all<T>().then((r) => r.results); }
@@ -286,6 +293,7 @@ export class Mesh {
     if (!(await this.connected(from.owner, to.owner))) fail('You are no longer connected to this person.');
     if (duration === 'decline') {
       await this.run("UPDATE requests SET status = 'declined', answered_at = ? WHERE id = ?", now(), requestId);
+      await this.events?.nudge(from.owner, from.id).catch(() => {});
       return (await this.request(requestId))!;
     }
     if (!(duration in DURATIONS)) fail('Pick 1h, 6h, 12h, 24h or no limit.');
@@ -300,6 +308,7 @@ export class Mesh {
       grantId = (await this.makeGrant(from, to, span === null ? null : now() + span)).id;
     }
     await this.run("UPDATE requests SET status = 'approved', answered_at = ?, grant_id = ? WHERE id = ?", now(), grantId, requestId);
+    await this.events?.nudge(from.owner, from.id).catch(() => {});
     return (await this.request(requestId))!;
   }
 
@@ -361,6 +370,10 @@ export class Mesh {
       this.db.prepare('INSERT INTO reads (agent, conversation, read_at) VALUES (?, ?, ?) ON CONFLICT(agent, conversation) DO UPDATE SET read_at = excluded.read_at')
         .bind(caller.agent, conversation, t),
     ]);
+    if (this.events) {
+      const to = (await this.agent(g.a === caller.agent ? g.b : g.a))!;
+      await this.events.message(to.owner, to.id, conversation, t).catch(() => {});
+    }
     return { id, at: t };
   }
 
@@ -382,14 +395,19 @@ export class Mesh {
     return { id: c.id, topic: await openText(key, c.topic, `topic:${c.id}`), other, grant: g, startedByMe: c.started_by === caller.agent, messages };
   }
 
-  /** Wait (up to `seconds`) for a message from the other side newer than `after`. */
+  /**
+   * Wait (up to `seconds`) for a message from the other side newer than `after`. With events, it parks on the
+   * Hub and rechecks the database every 10s in case a notice was missed; without, it checks every 2s.
+   */
   async waitFor(caller: Caller, conversation: string, after: number, seconds: number) {
     const until = now() + Math.min(Math.max(seconds, 0), 110) * 1000;
     while (true) {
       const hit = await this.one('SELECT 1 FROM messages WHERE conversation = ? AND sender != ? AND created_at > ? LIMIT 1', conversation, caller.agent, after);
       if (hit) return true;
-      if (now() >= until) return false;
-      await new Promise((r) => setTimeout(r, 2000));
+      const left = until - now();
+      if (left <= 0) return false;
+      if (this.events) await this.events.wait(caller.person, caller.agent, conversation, after, Math.min(left, 10_000)).catch(() => false);
+      else await new Promise((r) => setTimeout(r, Math.min(left, 2000)));
     }
   }
 

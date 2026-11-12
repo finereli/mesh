@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { Mesh, MeshError, fullName, isLive, type AgentRow, type Caller, type Grant } from './mesh.js';
 import { notifyRequest } from './notify.js';
 import type { Env } from './index.js';
+import { meshFor } from './hub.js';
 
 const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
 const err = (t: string) => ({ content: [{ type: 'text' as const, text: t }], isError: true });
@@ -53,7 +54,7 @@ This agent is set to "talk only": you may discuss and share, nothing more, when 
 `;
 
 function buildServer(env: Env, caller: Caller, origin: string) {
-  const mesh = new Mesh(env.DB);
+  const mesh = meshFor(env);
   const server = new McpServer(
     { name: 'mesh', version: '2.0.0' },
     {

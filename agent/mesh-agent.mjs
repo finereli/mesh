@@ -13,6 +13,9 @@
  *   mesh-agent status                                                 who it is and what it's doing
  *   mesh-agent uninstall                                              remove the service (keeps the config)
  *
+ * `run` holds a websocket to Mesh and wakes the moment a message arrives (Node 22+; older Node checks every
+ * 15 seconds instead). It also checks every few minutes in case a notice went missing.
+ *
  * No dependencies; Node 18 or later. Config lives in ~/.config/mesh-agent/config.json (mode 600).
  */
 import { spawn, execFileSync } from 'node:child_process';
@@ -28,7 +31,9 @@ const CONFIG = join(CONFIG_DIR, 'config.json');
 const STATE = join(CONFIG_DIR, 'state.json');
 const INSTALL_DIR = join(HOME, '.local', 'share', 'mesh-agent');
 const INSTALLED = join(INSTALL_DIR, 'mesh-agent.mjs');
-const POLL_MS = 15_000;
+const POLL_MS = 15_000; // without a websocket
+const SAFETY_MS = 5 * 60_000; // with one: a full check this often anyway
+const PING_MS = 30_000;
 const CLAUDE_TIMEOUT_MS = 5 * 60_000;
 const MAX_REPLIES_PER_HOUR = 20;
 
@@ -175,6 +180,58 @@ async function tick(cfg, me) {
   for (const w of inbox.waiting) log(`${w.from} asked to talk to this agent: "${w.reason}". Approve from the email.`);
 }
 
+// ---------- watching ----------
+
+/** Run tick() whenever asked, one at a time; a request that arrives mid-tick runs another right after. */
+function ticker(cfg, me) {
+  let running = false, again = false;
+  return async function check() {
+    if (running) { again = true; return; }
+    running = true;
+    try {
+      do { again = false; try { await tick(cfg, me); } catch (e) { log(`check failed: ${e.message}`); } } while (again);
+    } finally { running = false; }
+  };
+}
+
+async function watch(cfg, me) {
+  const check = ticker(cfg, me);
+  if (typeof WebSocket !== 'function') {
+    log(`${me.name}: checking ${cfg.origin} every ${POLL_MS / 1000}s (Node ${process.versions.node} has no WebSocket; 22+ answers instantly), answering in ${cfg.dir}`);
+    for (;;) { await check(); await new Promise((r) => setTimeout(r, POLL_MS)); }
+  }
+  log(`${me.name}: listening on ${cfg.origin}, answering in ${cfg.dir}`);
+  setInterval(check, SAFETY_MS);
+  let backoff = 1000;
+  for (;;) {
+    const opened = await listen(cfg, check).catch((e) => { log(`connection failed: ${e.message}`); return false; });
+    backoff = opened ? 1000 : Math.min(backoff * 2, 60_000);
+    await new Promise((r) => setTimeout(r, backoff));
+  }
+}
+
+/** One websocket session. Resolves when it closes: true if it had opened, false if it never did. */
+async function listen(cfg, check) {
+  const url = cfg.origin.replace(/^http/, 'ws') + '/api/stream';
+  const ws = new WebSocket(url, { headers: { authorization: `Bearer ${await token(cfg)}` } });
+  return new Promise((resolve) => {
+    let opened = false, lastPong = Date.now();
+    const pinger = setInterval(() => {
+      if (Date.now() - lastPong > 2 * PING_MS + 5000) { log('connection went quiet, reconnecting'); ws.close(); return; }
+      try { ws.send('ping'); } catch {}
+    }, PING_MS);
+    ws.onopen = () => { opened = true; check(); }; // catch up on anything sent while disconnected
+    ws.onmessage = (e) => {
+      lastPong = Date.now();
+      if (e.data === 'pong') return;
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === 'message' || m.type === 'inbox') check();
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => { clearInterval(pinger); if (opened) log('disconnected, reconnecting'); resolve(opened); };
+  });
+}
+
 // ---------- service install ----------
 
 function install(cfg, timerMinutes) {
@@ -257,13 +314,7 @@ async function main() {
     return;
   }
   if (cmd === 'once') return tick(cfg, me);
-  if (cmd === 'run') {
-    log(`${me.name}: watching ${cfg.origin}, answering in ${cfg.dir}`);
-    for (;;) {
-      try { await tick(cfg, me); } catch (e) { log(`check failed: ${e.message}`); }
-      await new Promise((r) => setTimeout(r, POLL_MS));
-    }
-  }
+  if (cmd === 'run') return watch(cfg, me);
   console.log(readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(2, 17).join('\n').replace(/^ \* ?/gm, ''));
 }
 

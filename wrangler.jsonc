@@ -15,6 +15,10 @@
   // The OAuth provider's token store, plus pending sign-ins.
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "3852508f7dfc46b9a05d3d3eafbf5e83" }],
 
+  // One Hub per person: daemons' websockets and waiting asks park there, and new messages wake them.
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+
   // Email for invites and approval requests. send_email only reaches addresses verified in Email Routing,
   // so it can't write to strangers.
   "send_email": [{ "name": "MAIL" }],
