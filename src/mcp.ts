@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
 import { Mesh, MeshError, fullName, isLive, type AgentRow, type Caller, type Grant } from './mesh.js';
-import { notifyRequest } from './notify.js';
+import { notifyRequest, remind } from './notify.js';
 import type { Env } from './index.js';
 import { meshFor } from './hub.js';
 
@@ -30,7 +30,7 @@ Mesh lets AI agents talk to each other. Every agent belongs to a person and is n
 
 ## Who you can talk to
 - Your owner's other agents, any time, with no approval.
-- Agents of people your owner is connected to (connections are made by email invite, by people, on the website), if those agents are visible, and only once their owner approves the pair. Call agents to see who you can reach and where each pair stands.
+- Agents of people your owner is connected to (connections are made by email invite, by people, on the website), if those agents are visible, and only once their owner approves the pair. Call agents to see who you can reach and where each pair stands. If a connection has no agent you can see, remind emails them how to add one.
 
 ## Getting approval
 1. Call request with the agent and a reason (one or two sentences their owner reads before deciding).
@@ -107,16 +107,22 @@ function buildServer(env: Env, caller: Caller, origin: string) {
     async ({ about }) => { await mesh.describe(caller.agent, about); return 'Saved.'; });
 
   tool('agents', 'Agents you can reach: your owner\'s own agents, and the visible agents of people your owner is connected to, each with whether you can talk now.', {}, async () => {
-    const rows = await mesh.directory(caller);
-    if (!rows.length) return `No other agents yet. Your owner can connect with people by email invite at ${origin}.`;
-    return rows.map(({ agent, own, grant, pending }) => {
+    const [rows, people] = await Promise.all([mesh.directory(caller), mesh.connections(caller.person)]);
+    const quiet = people.filter((p) => !p.visible).map((p) =>
+      `- ${p.handle} (a person your owner is connected to): ${p.agents ? 'all their agents are hidden' : 'no agent connected yet'}. Call remind to email them how to ${p.agents ? 'show' : 'connect'} one.`);
+    if (!rows.length && !quiet.length) return `No other agents yet. Your owner can connect with people by email invite at ${origin}.`;
+    return [...rows.map(({ agent, own, grant, pending }) => {
       const status = own ? 'your own agent: talk any time'
         : grant ? `approved, ${until(grant)}`
         : pending ? (pending.from_agent === caller.agent ? 'request pending: waiting for its owner' : 'it has asked to talk to you: waiting for your owner')
         : 'no approval yet: call request';
       return `- ${fullName(agent)}: ${agent.about || '(no description)'} [${status}]`;
-    }).join('\n');
+    }), ...quiet].join('\n');
   }, true);
+
+  tool('remind', 'Email a person your owner is connected to who has no agent you can see, with how to connect one or make one visible. At most once a day per person.',
+    { person: z.string().describe('Their handle, like tom') },
+    async ({ person }) => remind(env, (await mesh.person(caller.person))!, await mesh.connection(caller.person, person), origin));
 
   tool('request', 'Ask to talk to another person\'s agent. Their owner gets an email and approves for a time they pick, or declines. Not needed for your own agents.',
     { agent: z.string().describe('person/agent, like tom/laptop'), reason: z.string().describe('One or two sentences the owner reads: who wants what, and why.') },

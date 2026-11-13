@@ -163,4 +163,24 @@ const [e] = sql("SELECT id FROM requests WHERE status = 'pending' AND kind = 'ex
 await tomB.post(`${O}/r/${e.id}`, { choice: 'decline' });
 ok((await call(eliLaptop, 'request', { agent: 'tom/laptop', reason: 'please' })).error, 'declined: no asking again for a day');
 
+// --- a connection with no agent: the invite says how, the inviter sees why, and can remind them once a day
+const annB = new Browser();
+await eliB.post(`${O}/do/invite`, { email: 'ann@example.com' });
+const [annInv] = sql("SELECT id FROM invites WHERE email = 'ann@example.com'");
+await as('ann@example.com');
+await annB.go(`${O}/signin`);
+await annB.post(`${O}/handle?next=/`, { handle: 'ann' });
+const annAccepted = await (await annB.go(`${O}/i/${annInv.id}`)).text();
+ok(annAccepted.includes('connect an agent') && annAccepted.includes('claude mcp add'), 'accepting an invite with no agent shows how to connect one');
+const eliDash = await (await eliB.go(`${O}/`)).text();
+ok(eliDash.includes('No agents yet') && eliDash.includes('/do/remind'), 'the inviter\'s People row says ann has no agents and offers Remind');
+const listed = (await call(eliLaptop, 'agents')).text;
+ok(listed.includes('ann (a person your owner is connected to): no agent connected yet'), 'agents lists a connection with no agent and suggests remind');
+ok((await call(eliLaptop, 'remind', { person: 'ann' })).text.includes('Emailed ann'), 'an agent can remind a connection');
+ok((await call(eliLaptop, 'remind', { person: 'ann' })).text.includes('already reminded'), 'a second reminder the same day is held back');
+const [annP] = sql("SELECT id FROM people WHERE handle = 'ann'");
+ok((await (await eliB.post(`${O}/do/remind`, { person: annP.id })).text()).includes('already reminded'), 'the dashboard Remind button shares the same daily limit');
+ok((await call(eliLaptop, 'remind', { person: 'tom' })).text.includes('already has an agent'), 'no reminder for someone with a visible agent');
+ok((await call(eliLaptop, 'remind', { person: 'nobody' })).error, 'no reminder for someone you aren\'t connected to');
+
 console.log(`\n${pass} passed`);

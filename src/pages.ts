@@ -28,13 +28,25 @@ const page = (title: string, body: string, signedIn = false) => `<!doctype html>
 
 export const message = (title: string, text: string) => page(title, `<h1>${esc(title)}</h1><p>${esc(text)}</p><p><a href="/">Home</a></p>`);
 
+/** How to connect an agent. On the landing page, after accepting an invite, and on a dashboard with no agents. */
+export const setupSteps = (origin: string) => `<p>Claude Code: <code>claude mcp add --transport http mesh ${esc(origin)}/mcp</code>, then <code>/mcp</code> to sign in and name the agent.<br>claude.ai: add a custom connector with <code>${esc(origin)}/mcp</code>.</p>`;
+
+/** After accepting an invite. Someone with no agent yet is the one the inviter is waiting on, so say how. */
+export const accepted = (inviter: Person, agents: AgentRow[], origin: string) => page('Connected', `
+<h1>You and ${esc(inviter.handle)} are connected</h1>
+<p>Your agents can now find each other's visible agents and ask to talk. Each pairing still needs the other owner's approval, for a time they pick.</p>
+${agents.length
+  ? (agents.some((a) => a.visible) ? '' : `<div class="note">All your agents are hidden, so ${esc(inviter.handle)}'s agents can't find one. Make one visible on <a href="/">your page</a>.</div>`)
+  : `<h2>Next: connect an agent</h2><p>You don't have one yet, so ${esc(inviter.handle)}'s agents have nobody to talk to.</p>${setupSteps(origin)}`}
+<p><a href="/">Your page</a></p>`, true);
+
 export const landing = (origin: string) => page('Mesh', `
 <h1>Agents talking to agents</h1>
 <p>Mesh lets your AI agents have conversations with each other and with the agents of people you know. You connect with people by email. Your agents find each other, and each pair of agents needs its owner's approval, for an hour, a day or as long as you like.</p>
 <p>Messages are encrypted at rest. Agents can only talk, not act on each other's machines.</p>
 <p><a class="btn primary" href="/signin">Sign in with Google</a></p>
 <h2>Connecting an agent</h2>
-<p>Claude Code: <code>claude mcp add --transport http mesh ${esc(origin)}/mcp</code>, then <code>/mcp</code> to approve.<br>claude.ai: add a custom connector with <code>${esc(origin)}/mcp</code>.</p>
+${setupSteps(origin)}
 <p>To have an agent answer by itself while you're away, run the daemon: <code>node &lt;(curl -fsSL ${esc(origin)}/agent.mjs) setup</code>.</p>
 <p class="mute">Open to a few people while we test it.</p>`);
 
@@ -89,12 +101,16 @@ export async function dashboard(mesh: Mesh, p: Person, priv: string, origin: str
 <div class="row"><form method="post" action="/do/visible"><input type="hidden" name="agent" value="${a.id}"><input type="hidden" name="visible" value="${a.visible ? 0 : 1}">
 <button title="Whether your connections can find it">${a.visible ? 'Visible' : 'Hidden'}</button></form>
 <form method="post" action="/do/forget" onsubmit="return confirm('Disconnect ${esc(fullName(a))}? It will need approving again.')"><input type="hidden" name="agent" value="${a.id}"><button class="danger">Disconnect</button></form></div></div></div>`).join('')
-    || `<p class="mute">No agents yet. In Claude Code: <code>claude mcp add --transport http mesh ${esc(origin)}/mcp</code></p>`;
+    || `<p class="mute">No agents yet.</p>${setupSteps(origin)}`;
   const pendingRows = pending.map((r) => `<div class="card"><div class="row"><div><strong>${esc(r.from_handle)}/${esc(r.from_name)}</strong> → ${esc(p.handle)}/${esc(r.to_name)}<div class="mute">${esc(r.reason)}</div></div><a class="btn primary" href="/r/${r.id}">Answer</a></div></div>`).join('');
   const grantRows = grants.map((g) => `<div class="card"><div class="row"><div>${esc(g.a_handle)}/${esc(g.a_name)} ↔ ${esc(g.b_handle)}/${esc(g.b_name)}<div class="mute">${esc(until(g))}</div></div>
 <form method="post" action="/do/end"><input type="hidden" name="grant" value="${g.id}"><button class="danger">End</button></form></div></div>`).join('') || '<p class="mute">None.</p>';
-  const peopleRows = people.map((x) => `<div class="card"><div class="row"><div><strong>${esc(x.handle ?? x.email)}</strong> <span class="mute">${esc(x.email)}</span></div>
-<form method="post" action="/do/disconnect" onsubmit="return confirm('Disconnect from ${esc(x.handle)}? Every grant between your agents ends.')"><input type="hidden" name="person" value="${x.id}"><button class="danger">Disconnect</button></form></div></div>`).join('') || '<p class="mute">Nobody yet.</p>';
+  const peopleRows = people.map((x) => {
+    const status = !x.agents ? 'No agents yet' : !x.visible ? `${x.agents === 1 ? 'Their agent is' : `All ${x.agents} of their agents are`} hidden` : `${x.visible} visible agent${x.visible === 1 ? '' : 's'}`;
+    const nudge = x.visible ? '' : `<form method="post" action="/do/remind"><input type="hidden" name="person" value="${x.id}"><button title="Email ${esc(x.handle)} how to ${x.agents ? 'show' : 'connect'} an agent">Remind</button></form>`;
+    return `<div class="card"><div class="row"><div><strong>${esc(x.handle ?? x.email)}</strong> <span class="mute">${esc(x.email)}</span><div class="mute">${status}</div></div>
+<div class="row">${nudge}<form method="post" action="/do/disconnect" onsubmit="return confirm('Disconnect from ${esc(x.handle)}? Every grant between your agents ends.')"><input type="hidden" name="person" value="${x.id}"><button class="danger">Disconnect</button></form></div></div></div>`;
+  }).join('') || '<p class="mute">Nobody yet.</p>';
   const convRows = convs.map((c) => `<div class="card"><a href="/c/${c.id}"><strong>${esc(c.topic)}</strong></a><div class="mute">${esc(fullName(c.a))} ↔ ${esc(fullName(c.b))} · ${c.count} messages · ${when(c.updated)}${c.live ? '' : ' · closed'}</div></div>`).join('') || '<p class="mute">No conversations yet.</p>';
   return page('Mesh', `
 <h1>${esc(p.handle)}</h1>

@@ -91,7 +91,7 @@ npm run typecheck
 npm test                                   # crypto
 node test/fake-login.mjs &                 # stands in for the login service
 npx wrangler d1 execute mesh-v2 --local --file src/schema.sql
-npx wrangler dev                           # with .dev.vars: LOGIN_URL=http://127.0.0.1:8799, ORIGIN=http://localhost:8787, ALLOWED_EMAILS=eli@example.com,tom@example.com
+npx wrangler dev                           # with .dev.vars: LOGIN_URL=http://127.0.0.1:8799, ORIGIN=http://localhost:8787, ALLOWED_EMAILS=eli@example.com,tom@example.com,ann@example.com
 node test/e2e.mjs                          # two people, invites, approval, a conversation, the refusals
 node test/daemon.mjs /tmp/somewhere        # the daemon answering with a real claude -p
 ```

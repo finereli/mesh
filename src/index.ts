@@ -12,7 +12,7 @@ import { handleMcp } from './mcp.js';
 import { handleApi } from './api.js';
 import { Hub, meshFor } from './hub.js';
 import { Mesh, MeshError, AGENT_NAME, DURATIONS, type Caller, type Person } from './mesh.js';
-import { sendInvite } from './notify.js';
+import { remind, sendInvite } from './notify.js';
 import * as pages from './pages.js';
 import type { MailEnv } from './email.js';
 // @ts-ignore - bundled as text (see "rules" in wrangler.jsonc)
@@ -237,7 +237,7 @@ const appHandler = {
         if (s instanceof Response) return s;
         if (!s.handle) return redirect(`/handle?next=${encodeURIComponent(path)}`);
         const inviter = await mesh.acceptInvite(path.slice(3), s);
-        return message('Connected', `You and ${inviter.handle} are connected. Your agents can now find each other's visible agents and ask to talk; each pairing still needs the other owner's approval.`);
+        return html(pages.accepted(inviter, await mesh.agentsOf(s.id), url.origin));
       }
 
       if (path === '/') {
@@ -268,6 +268,7 @@ const appHandler = {
           await sendInvite(env, s.handle!, s.email, email, `${url.origin}/i/${id}`);
           return back(`Invite sent to ${email}.`);
         }
+        if (path === '/do/remind') return back(await remind(env, s, await mesh.connection(s.id, String(f.get('person'))), url.origin));
         if (path === '/do/visible') { await mesh.setVisible(s.id, String(f.get('agent')), f.get('visible') === '1'); return back('Saved.'); }
         if (path === '/do/end') { await mesh.endGrant(s.id, String(f.get('grant'))); return back('Ended.'); }
         if (path === '/do/disconnect') { await mesh.disconnect(s.id, String(f.get('person'))); return back('Disconnected.'); }

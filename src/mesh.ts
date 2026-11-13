@@ -11,6 +11,7 @@ export const DURATIONS: Record<string, number | null> = { '1h': HOUR, '6h': 6 * 
 export interface Person { id: string; sub: string; email: string; handle: string | null; pub: string; sealed_priv: string; created_at: number }
 export interface Agent { id: string; owner: string; name: string; about: string; visible: number; mode: string; created_at: number; seen_at: number | null }
 export interface AgentRow extends Agent { handle: string }
+export interface Connection extends Person { since: number; agents: number; visible: number }
 export interface Grant { id: string; a: string; b: string; self: number; created_at: number; ends_at: number | null; ended_at: number | null }
 export interface Request { id: string; kind: 'pair' | 'extend'; from_agent: string; to_agent: string; reason: string; status: string; created_at: number; answered_at: number | null; grant_id: string | null; seen: number }
 
@@ -88,11 +89,23 @@ export class Mesh {
     );
   }
 
+  /** The people you're connected to, each with how many agents they have and how many you can see. */
   connections(person: string) {
-    return this.all<Person & { since: number }>(
-      `SELECT p.*, c.created_at AS since FROM connections c JOIN people p ON p.id = CASE WHEN c.a = ? THEN c.b ELSE c.a END
+    return this.all<Connection>(
+      `SELECT p.*, c.created_at AS since,
+         (SELECT COUNT(*) FROM agents WHERE owner = p.id) AS agents,
+         (SELECT COUNT(*) FROM agents WHERE owner = p.id AND visible = 1) AS visible
+       FROM connections c JOIN people p ON p.id = CASE WHEN c.a = ? THEN c.b ELSE c.a END
        WHERE c.a = ? OR c.b = ? ORDER BY p.handle`, person, person, person,
     );
+  }
+
+  /** A connection by handle (or person id), or a refusal that says why. */
+  async connection(person: string, ref: string): Promise<Connection> {
+    const h = ref.trim().toLowerCase().replace(/^@/, '').split('/')[0];
+    const c = (await this.connections(person)).find((x) => x.handle === h || x.id === ref);
+    if (!c) fail(`You aren't connected to anyone called "${ref}". Call agents to see who you're connected to.`);
+    return c!;
   }
 
   async invite(from: string, email: string): Promise<string> {
