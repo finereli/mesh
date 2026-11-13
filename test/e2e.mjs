@@ -64,6 +64,7 @@ async function call(token, name, args = {}) {
   return { text: j.result.content[0].text, error: Boolean(j.result.isError) };
 }
 const api = (token, path, body) => fetch(`${O}${path}`, { method: body ? 'POST' : 'GET', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
+const kvKeys = (prefix) => JSON.parse(execFileSync('npx', ['wrangler', 'kv', 'key', 'list', '--binding', 'OAUTH_KV', '--local', '--prefix', prefix], { encoding: 'utf8' })).map((k) => k.name);
 const sql = (q) => JSON.parse(execFileSync('npx', ['wrangler', 'd1', 'execute', 'mesh-v2', '--local', '--json', '--command', q], { encoding: 'utf8' }))[0].results;
 
 // --- unauthenticated MCP starts the OAuth dance
@@ -182,5 +183,10 @@ const [annP] = sql("SELECT id FROM people WHERE handle = 'ann'");
 ok((await (await eliB.post(`${O}/do/remind`, { person: annP.id })).text()).includes('already reminded'), 'the dashboard Remind button shares the same daily limit');
 ok((await call(eliLaptop, 'remind', { person: 'tom' })).text.includes('already has an agent'), 'no reminder for someone with a visible agent');
 ok((await call(eliLaptop, 'remind', { person: 'nobody' })).error, 'no reminder for someone you aren\'t connected to');
+
+ok(kvKeys(`waiting:${annP.id}:`).length === 1, 'a reminder leaves eli waiting on ann');
+await agent(annB, 'ann@example.com', 'phone');
+ok((await call(eliLaptop, 'agents')).text.includes('ann/phone'), 'ann\'s new agent shows up for eli');
+ok(kvKeys(`waiting:${annP.id}:`).length === 0, 'ann\'s first visible agent tells whoever was waiting, once');
 
 console.log(`\n${pass} passed`);

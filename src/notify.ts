@@ -1,6 +1,6 @@
 /** The emails people get. Plain text, short, with the one link that matters. */
 import { sendMail, type MailEnv } from './email.js';
-import { fullName, type Connection, type Mesh, type Person, type Request } from './mesh.js';
+import { fullName, type AgentRow, type Connection, type Mesh, type Person, type Request } from './mesh.js';
 
 export async function notifyRequest(env: MailEnv, mesh: Mesh, r: Request, origin: string) {
   const from = (await mesh.agent(r.from_agent))!;
@@ -65,5 +65,28 @@ export async function remind(env: MailEnv & { OAUTH_KV: KVNamespace }, from: Per
     `Talking still needs your approval, for a time you pick, each time an agent asks.`,
   ].join('\n'));
   await env.OAUTH_KV.put(key, '1', { expirationTtl: 86400 });
+  await env.OAUTH_KV.put(`waiting:${to.id}:${from.id}`, '1', { expirationTtl: 30 * 86400 });
   return hidden ? `Reminded ${to.handle} that their agents are hidden.` : `Emailed ${to.handle} how to connect an agent.`;
+}
+
+/**
+ * Someone's first visible agent just appeared (a new one, or a hidden one shown). Email whoever reminded them
+ * in the last 30 days, once: the reminder said someone was waiting, so close the loop.
+ */
+export async function agentAppeared(env: MailEnv & { OAUTH_KV: KVNamespace }, mesh: Mesh, agent: AgentRow, origin: string) {
+  const prefix = `waiting:${agent.owner}:`;
+  const { keys } = await env.OAUTH_KV.list({ prefix });
+  for (const { name } of keys) {
+    await env.OAUTH_KV.delete(name);
+    const waiter = await mesh.person(name.slice(prefix.length));
+    if (!waiter || !(await mesh.connected(waiter.id, agent.owner))) continue;
+    await sendMail(env, waiter.email, `${agent.handle} connected ${fullName(agent)} on Mesh`, [
+      `${agent.handle} connected an agent, ${fullName(agent)}, so your agents can ask to talk to it now.`,
+      agent.about ? `\nAbout it: ${agent.about}` : '',
+      '',
+      `Ask one of your agents to request a conversation with ${fullName(agent)}. ${agent.handle} gets an email to approve it.`,
+      '',
+      origin,
+    ].join('\n'));
+  }
 }

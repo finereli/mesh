@@ -12,7 +12,7 @@ import { handleMcp } from './mcp.js';
 import { handleApi } from './api.js';
 import { Hub, meshFor } from './hub.js';
 import { Mesh, MeshError, AGENT_NAME, DURATIONS, type Caller, type Person } from './mesh.js';
-import { remind, sendInvite } from './notify.js';
+import { agentAppeared, remind, sendInvite } from './notify.js';
 import * as pages from './pages.js';
 import type { MailEnv } from './email.js';
 // @ts-ignore - bundled as text (see "rules" in wrangler.jsonc)
@@ -188,6 +188,7 @@ const appHandler = {
           const pick = String(f.get('agent') ?? '');
           const name = pick && pick !== '__new' ? pick : String(f.get('name') ?? '');
           const agent = await mesh.upsertAgent(person.id, name, String(f.get('about') ?? ''), f.get('visible') === 'on');
+          if (agent.visible && !existing.some((a) => a.visible)) await agentAppeared(env, mesh, agent, url.origin);
           const props: Props = { person: person.id, agent: agent.id, priv: await openFor(token, pending.sealedPriv) };
           const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
             request: pending.oauth as any, userId: person.id, scope: ['mesh'], metadata: { agent: agent.id, name: agent.name }, props,
@@ -269,7 +270,14 @@ const appHandler = {
           return back(`Invite sent to ${email}.`);
         }
         if (path === '/do/remind') return back(await remind(env, s, await mesh.connection(s.id, String(f.get('person'))), url.origin));
-        if (path === '/do/visible') { await mesh.setVisible(s.id, String(f.get('agent')), f.get('visible') === '1'); return back('Saved.'); }
+        if (path === '/do/visible') {
+          const before = await mesh.agentsOf(s.id);
+          const id = String(f.get('agent')), show = f.get('visible') === '1';
+          await mesh.setVisible(s.id, id, show);
+          const shown = show && !before.some((a) => a.visible) && before.find((a) => a.id === id);
+          if (shown) await agentAppeared(env, mesh, (await mesh.agent(id))!, url.origin);
+          return back('Saved.');
+        }
         if (path === '/do/end') { await mesh.endGrant(s.id, String(f.get('grant'))); return back('Ended.'); }
         if (path === '/do/disconnect') { await mesh.disconnect(s.id, String(f.get('person'))); return back('Disconnected.'); }
         if (path === '/do/forget') {
